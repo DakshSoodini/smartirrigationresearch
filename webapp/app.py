@@ -206,6 +206,46 @@ def api_audit(limit: int = 50):
 
 
 # --------------------------------------------------------------------------
+# Google Sheet sync — pull the irrigation schedule directly from the sheet
+# --------------------------------------------------------------------------
+# Instead of uploading the events CSV by hand each time, the sheet is fetched
+# from Google's published-CSV export and fed through the same
+# process_events_csv pipeline as a manual upload. Configure once via the
+# SHEET_CSV_URL environment variable (File > Share > Publish to web > CSV, or
+# https://docs.google.com/spreadsheets/d/<ID>/export?format=csv&gid=<gid>
+# on a link-shared sheet). No Google API credentials needed.
+
+@app.get("/api/sync_sheet")
+@app.post("/api/sync_sheet")
+async def api_sync_sheet(planting_date: str = Form("2026-06-08")):
+    import urllib.request
+    from urllib.parse import urlparse
+    url = os.environ.get("SHEET_CSV_URL", "").strip()
+    if not url:
+        raise HTTPException(400, "SHEET_CSV_URL is not configured. Set it in "
+                                 "the Render environment to the sheet's "
+                                 "published/export CSV link.")
+    if urlparse(url).hostname not in ("docs.google.com",
+                                      "docs.googleusercontent.com"):
+        raise HTTPException(400, "SHEET_CSV_URL must be a docs.google.com link.")
+    try:
+        with urllib.request.urlopen(url, timeout=30) as r:
+            data = r.read()
+    except Exception as e:
+        raise HTTPException(502, f"Could not fetch the Google Sheet: {e}")
+    if data.lstrip()[:1] in (b"<",):
+        raise HTTPException(502, "Got HTML instead of CSV — is the sheet "
+                                 "published/link-shared as CSV?")
+    ts = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S")
+    dest = UPLOADS / f"events_{ts}_sheet.csv"
+    dest.write_bytes(data)
+    res = service.process_events_csv(str(dest), planting_date)
+    if isinstance(res, dict):
+        res["source"] = "google_sheet"
+    return JSONResponse(res)
+
+
+# --------------------------------------------------------------------------
 # T2 decision log
 # --------------------------------------------------------------------------
 # Field protocol: at each decision window the worker asks the model for a
