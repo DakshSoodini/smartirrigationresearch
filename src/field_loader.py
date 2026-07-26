@@ -9,10 +9,14 @@ calibration.
 FIELD SETUP (confirmed July 2026)
 ---------------------------------
   - Study TST1234, English cucumber, planting 2026-06-08
-  - Treatment assignment (authoritative, per researcher, July 2026):
-        P1 = T2 (IQL agent plot)
-        P2 = T0 (farmer's traditional schedule)
-        P3 = T1 (fixed 12-min alternate-day control)
+  - Treatment assignment (authoritative, per researcher, 26 July 2026):
+        P1 = T0 (farmer's traditional schedule)
+        P2 = T1 (fixed 12-min alternate-day control)
+        P3 = T2 (IQL agent plot)
+    This SUPERSEDES the earlier P1=T2 / P2=T0 / P3=T1 assignment. Because
+    all three plots ran the same regime until the treatments actually
+    diverged (see NOTE below), no historical contrast is affected by the
+    change and the mapping is applied uniformly to all rows.
     WARNING: the node firmware's `treatment` CSV column does NOT match this
     (it tags P1=0, P2=1, P3=1). Use PLOT_TREATMENT below, never the raw
     column, for analysis. The raw column is kept as `treatment_fw` for
@@ -55,9 +59,10 @@ DRIP_RATE_L_PER_H = 1.0   # per emitter ~ per plant
 
 TZ = "Asia/Kolkata"       # all field operations and event clock times are IST
 
-# Authoritative plot -> treatment mapping (July 2026). The firmware CSV
-# `treatment` column is WRONG for P1/P2 — do not use it for analysis.
-PLOT_TREATMENT = {"P1": "T2", "P2": "T0", "P3": "T1"}
+# Authoritative plot -> treatment mapping (26 July 2026, supersedes the
+# earlier P1=T2/P2=T0/P3=T1). The firmware CSV `treatment` column does NOT
+# match this — do not use it for analysis; it is kept as `treatment_fw`.
+PLOT_TREATMENT = {"P1": "T0", "P2": "T1", "P3": "T2"}
 
 # Event log — single source of truth. Times are local IST; if a specific
 # clock time is unknown we assume the morning window (08:30) for irrigation.
