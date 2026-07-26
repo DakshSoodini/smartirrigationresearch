@@ -278,7 +278,7 @@ class ModelService:
             return {"ok": False, "error": f"Could not read CSV: {e}"}
 
         # Load the sensor file once (if provided) for real per-day moisture.
-        t2_plot = self.cfg["actuator"].get("t2_plot_id", "P1")
+        t2_plot = self.cfg["actuator"].get("t2_plot_id", "P3")
         sensor_df = None
         if sensor_csv_path:
             try:

@@ -95,7 +95,7 @@ async def api_upload(file: UploadFile = File(...),
     # The recommendation is for the T2 (agent) plot, so it must be driven by
     # that plot's own probe — not whichever node happened to transmit last.
     # (Inter-plot probe offsets are ~4 pts, larger than the day-to-day signal.)
-    t2_plot = service.cfg["actuator"].get("t2_plot_id", "P1")
+    t2_plot = service.cfg["actuator"].get("t2_plot_id", "P3")
     latest = service.latest_moisture_from_csv(str(dest), plot_filter=t2_plot)
     if not latest["ok"]:
         return JSONResponse({"ok": False, "error": latest["error"]})
