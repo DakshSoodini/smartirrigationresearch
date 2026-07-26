@@ -203,3 +203,184 @@ def api_audit(limit: int = 50):
     lines = AUDIT_LOG.read_text().strip().splitlines()[-limit:]
     import json
     return JSONResponse({"entries": [json.loads(x) for x in lines][::-1]})
+
+
+# --------------------------------------------------------------------------
+# T2 decision log
+# --------------------------------------------------------------------------
+# Field protocol: at each decision window the worker asks the model for a
+# recommendation, then records whether it was actually executed (and if not,
+# what was done instead and why). Append-only JSONL beside the audit log;
+# CSV export for analysis. No admin key — the worker uses this daily.
+
+DECISIONS_LOG = AUDIT_LOG.parent / "decisions.jsonl"
+
+
+@app.post("/api/decision")
+async def api_decision(executed: str = Form(...),
+                       recommended_minutes: int = Form(...),
+                       actual_minutes: int = Form(None),
+                       moisture_pct: float = Form(None),
+                       reason: str = Form("")):
+    """Log whether the model's recommendation was executed at this window."""
+    import json
+    from zoneinfo import ZoneInfo
+    executed = executed.strip().lower()
+    if executed not in ("yes", "no"):
+        raise HTTPException(400, "executed must be 'yes' or 'no'")
+    if actual_minutes is None:
+        actual_minutes = recommended_minutes if executed == "yes" else 0
+    now_utc = datetime.now(timezone.utc)
+    entry = {
+        "ts": now_utc.strftime("%Y-%m-%dT%H:%M:%S.%f") + "Z",
+        "date_ist": str(now_utc.astimezone(ZoneInfo("Asia/Kolkata")).date()),
+        "executed": executed == "yes",
+        "recommended_minutes": recommended_minutes,
+        "actual_minutes": actual_minutes,
+        "moisture_pct": moisture_pct,
+        "reason": reason.strip(),
+        "model_version": read_status().get("model_version", 0),
+    }
+    with open(DECISIONS_LOG, "a") as f:
+        f.write(json.dumps(entry) + "\n")
+    return JSONResponse({"ok": True, "entry": entry})
+
+
+def _read_decisions(limit: int = None):
+    import json
+    if not DECISIONS_LOG.exists():
+        return []
+    lines = DECISIONS_LOG.read_text().strip().splitlines()
+    if limit:
+        lines = lines[-limit:]
+    return [json.loads(x) for x in lines]
+
+
+@app.get("/api/decision_log")
+def api_decision_log(limit: int = 200):
+    return JSONResponse({"entries": _read_decisions(limit)[::-1]})
+
+
+@app.get("/api/decision_log.csv")
+def api_decision_log_csv():
+    import csv, io
+    from fastapi.responses import PlainTextResponse
+    cols = ["ts", "date_ist", "executed", "recommended_minutes",
+            "actual_minutes", "moisture_pct", "reason", "model_version"]
+    buf = io.StringIO()
+    w = csv.DictWriter(buf, fieldnames=cols, extrasaction="ignore")
+    w.writeheader()
+    for e in _read_decisions():
+        w.writerow(e)
+    return PlainTextResponse(
+        buf.getvalue(), media_type="text/csv",
+        headers={"Content-Disposition":
+                 "attachment; filename=decision_log.csv"})
+
+
+_DECIDE_HTML = """<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>T2 decision log</title>
+<style>
+  body { font-family: system-ui, sans-serif; max-width: 480px;
+         margin: 1.5rem auto; padding: 0 1rem; color: #143; }
+  h1 { font-size: 1.25rem; }
+  label { display: block; margin: .8rem 0 .25rem; font-weight: 600; }
+  input, textarea { width: 100%; padding: .55rem; font-size: 1rem;
+         border: 1px solid #9c9; border-radius: 8px; box-sizing: border-box; }
+  button { margin-top: 1rem; padding: .7rem 1.2rem; font-size: 1.05rem;
+         border: 0; border-radius: 10px; cursor: pointer; }
+  #get  { background: #2a7; color: #fff; }
+  #yes  { background: #2a7; color: #fff; }
+  #no   { background: #c53; color: #fff; margin-left: .75rem; }
+  .card { background: #f2faf4; border: 1px solid #bde3c8; border-radius: 12px;
+         padding: 1rem; margin-top: 1.25rem; }
+  .big  { font-size: 1.35rem; font-weight: 700; }
+  .muted{ color: #567; font-size: .9rem; }
+  #followup, #done { display: none; }
+</style>
+</head>
+<body>
+<h1>T2 plot — irrigation decision</h1>
+
+<label for="moist">Soil moisture (%)</label>
+<input id="moist" type="number" step="0.1" inputmode="decimal">
+
+<button id="get">Get recommendation</button>
+
+<div id="rec" class="card" style="display:none">
+  <div class="big" id="recText"></div>
+  <div class="muted" id="recMeta"></div>
+  <p class="big">Will you execute this?</p>
+  <button id="yes">Yes — as recommended</button>
+  <button id="no">No / different</button>
+  <div id="followup">
+    <label for="actual">Minutes actually run (0 if none)</label>
+    <input id="actual" type="number" inputmode="numeric">
+    <label for="reason">Reason (optional)</label>
+    <textarea id="reason" rows="2"></textarea>
+    <button id="save" style="background:#2a7;color:#fff">Save decision</button>
+  </div>
+</div>
+
+<div id="done" class="card">
+  <div class="big">Recorded ✔</div>
+  <div class="muted">Logged to the decision log.
+    <a href="/api/decision_log.csv">Download CSV</a></div>
+</div>
+
+<script>
+let rec = null;
+const el = id => document.getElementById(id);
+
+el('get').onclick = async () => {
+  const m = parseFloat(el('moist').value);
+  if (isNaN(m)) { alert('Enter the soil moisture reading first.'); return; }
+  const fd = new FormData();
+  fd.append('moisture_pct', m);
+  const r = await fetch('/api/recommend', {method: 'POST', body: fd});
+  rec = await r.json();
+  if (!rec.ok) { alert(rec.detail || 'Recommendation failed'); return; }
+  el('recText').textContent = rec.drip_minutes > 0
+      ? `Run drip ${rec.drip_minutes} min (${rec.litres_per_plant} L/plant)`
+      : 'No water needed now';
+  el('recMeta').textContent =
+      `stage: ${rec.stage} | day ${rec.days_after_transplant}` +
+      ` | window ${rec.time} | model v${rec.model_version}`;
+  el('rec').style.display = 'block';
+  el('done').style.display = 'none';
+  el('followup').style.display = 'none';
+};
+
+async function save(executed, actual, reason) {
+  const fd = new FormData();
+  fd.append('executed', executed);
+  fd.append('recommended_minutes', rec.drip_minutes);
+  if (actual !== null) fd.append('actual_minutes', actual);
+  fd.append('moisture_pct', rec.moisture_pct);
+  fd.append('reason', reason || '');
+  const r = await fetch('/api/decision', {method: 'POST', body: fd});
+  const res = await r.json();
+  if (!res.ok) { alert(res.detail || 'Save failed'); return; }
+  el('rec').style.display = 'none';
+  el('done').style.display = 'block';
+}
+
+el('yes').onclick = () => save('yes', null, '');
+el('no').onclick = () => { el('followup').style.display = 'block'; };
+el('save').onclick = () => {
+  const a = parseInt(el('actual').value);
+  if (isNaN(a)) { alert('Enter the minutes actually run (0 if none).'); return; }
+  save('no', a, el('reason').value);
+};
+</script>
+</body>
+</html>"""
+
+
+@app.get("/decide", response_class=HTMLResponse)
+def decide():
+    return _DECIDE_HTML
