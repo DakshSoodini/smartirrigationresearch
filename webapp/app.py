@@ -215,16 +215,83 @@ def api_audit(limit: int = 50):
 # https://docs.google.com/spreadsheets/d/<ID>/export?format=csv&gid=<gid>
 # on a link-shared sheet). No Google API credentials needed.
 
+# The farm's schedule sheet (link-shared). SHEET_CSV_URL env var overrides.
+DEFAULT_SHEET_CSV_URL = ("https://docs.google.com/spreadsheets/d/"
+                         "1wYvuvvKgb9jGr8sF8_5Bk56UDV7Vqgmd4Pt-FmXy4Q0/"
+                         "export?format=csv")
+
+
+def _field_log_to_events_csv(text: str) -> str:
+    """Convert the farm's field-log sheet layout
+    (metadata rows, then: Date, Irrigation Time (min), Rain Time (min))
+    into the events schema process_events_csv expects. Sheets already in the
+    events schema pass through unchanged.
+
+    Conventions: 'Nil' = decided not to irrigate (amount 0); an EMPTY
+    irrigation cell = not yet filled in (row skipped); a range like
+    '8-10 m' becomes its midpoint; rain rows are emitted only when the
+    rain cell has a value.
+    """
+    import csv, io, re
+    from datetime import datetime as _dt
+    rows = list(csv.reader(io.StringIO(text)))
+    hdr_i = None
+    for i, row in enumerate(rows):
+        if row and (row[0] or "").strip().lower() == "date":
+            hdr_i = i
+            break
+    if hdr_i is None:
+        return text                      # unknown layout — let the processor report
+    hdr = [(c or "").strip().lower() for c in rows[hdr_i]]
+    if "type" in hdr and "amount" in hdr:
+        return text                      # already the events schema
+
+    def col(sub):
+        for j, c in enumerate(hdr):
+            if sub in c:
+                return j
+        return None
+
+    irr_j, rain_j = col("irrigation"), col("rain")
+
+    def minutes(cell):
+        nums = [float(x) for x in re.findall(r"\d+(?:\.\d+)?", cell or "")]
+        return sum(nums) / len(nums) if nums else 0.0
+
+    out = io.StringIO()
+    w = csv.writer(out)
+    w.writerow(["date", "type", "amount", "unit",
+                "farmer_would_water", "farmer_reason"])
+    for row in rows[hdr_i + 1:]:
+        ds = (row[0] or "").strip() if row else ""
+        if not ds:
+            continue
+        d = None
+        for fmt in ("%d-%B-%Y", "%d-%b-%Y", "%Y-%m-%d", "%d/%m/%Y"):
+            try:
+                d = _dt.strptime(ds, fmt).date()
+                break
+            except ValueError:
+                pass
+        if d is None:
+            continue
+        irr = (row[irr_j] or "").strip() if irr_j is not None and irr_j < len(row) else ""
+        rain = (row[rain_j] or "").strip() if rain_j is not None and rain_j < len(row) else ""
+        if irr:                          # 'Nil' -> 0; empty -> no entry yet
+            w.writerow([d.isoformat(), "irrigation", minutes(irr),
+                        "minutes", "", ""])
+        if rain:
+            w.writerow([d.isoformat(), "rain", minutes(rain),
+                        "minutes", "", ""])
+    return out.getvalue()
+
+
 @app.get("/api/sync_sheet")
 @app.post("/api/sync_sheet")
 async def api_sync_sheet(planting_date: str = Form("2026-06-08")):
     import urllib.request
     from urllib.parse import urlparse
-    url = os.environ.get("SHEET_CSV_URL", "").strip()
-    if not url:
-        raise HTTPException(400, "SHEET_CSV_URL is not configured. Set it in "
-                                 "the Render environment to the sheet's "
-                                 "published/export CSV link.")
+    url = os.environ.get("SHEET_CSV_URL", "").strip() or DEFAULT_SHEET_CSV_URL
     if urlparse(url).hostname not in ("docs.google.com",
                                       "docs.googleusercontent.com"):
         raise HTTPException(400, "SHEET_CSV_URL must be a docs.google.com link.")
@@ -237,8 +304,11 @@ async def api_sync_sheet(planting_date: str = Form("2026-06-08")):
         raise HTTPException(502, "Got HTML instead of CSV — is the sheet "
                                  "published/link-shared as CSV?")
     ts = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S")
+    raw = UPLOADS / f"events_{ts}_sheet_raw.csv"
+    raw.write_bytes(data)                       # keep the original for audit
+    converted = _field_log_to_events_csv(data.decode("utf-8-sig", "replace"))
     dest = UPLOADS / f"events_{ts}_sheet.csv"
-    dest.write_bytes(data)
+    dest.write_text(converted, encoding="utf-8")
     res = service.process_events_csv(str(dest), planting_date)
     if isinstance(res, dict):
         res["source"] = "google_sheet"
