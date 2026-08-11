@@ -205,6 +205,33 @@ def api_audit(limit: int = 50):
     return JSONResponse({"entries": [json.loads(x) for x in lines][::-1]})
 
 
+@app.get("/api/judgments")
+def api_judgments(limit: int = 500):
+    """Read back the farmer judgments currently on disk.
+
+    Render's disk is ephemeral, so this file is erased on every restart or
+    deploy. Judgments are relayed to a Google Form as they arrive (see
+    model_service._relay_judgment_async), but this endpoint is the rescue
+    path: it lets the entries be pulled off a running instance, and lets us
+    verify the relay is keeping up. Newest first.
+    """
+    import json
+    from model_service import LOGS
+    f = LOGS / "farmer_judgments.jsonl"
+    if not f.exists():
+        return JSONResponse({"count": 0, "entries": [],
+                             "note": "No judgments on this instance's disk. "
+                                     "They may never have been submitted, or "
+                                     "the instance restarted since."})
+    rows = []
+    for line in f.read_text().strip().splitlines():
+        try:
+            rows.append(json.loads(line))
+        except Exception:
+            continue
+    return JSONResponse({"count": len(rows), "entries": rows[-limit:][::-1]})
+
+
 # --------------------------------------------------------------------------
 # Google Sheet sync — pull the irrigation schedule directly from the sheet
 # --------------------------------------------------------------------------

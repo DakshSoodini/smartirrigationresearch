@@ -82,6 +82,54 @@ def audit(event: str, **fields):
     return rec
 
 
+# --------------------------------------------------------------------------
+# Durable relay for farmer judgments (Render's disk is EPHEMERAL — anything
+# only written to storage/ is erased on every restart or deploy; a real
+# farmer entry was lost this way on 2026-08-11).
+#
+# Primary sink: a Google Form the researcher owns. Form submissions land in
+# its linked results Sheet, survive restarts, and need no credentials here —
+# a formResponse POST is plain HTTP. Configure via environment:
+#   JUDGMENT_FORM_URL    e.g. https://docs.google.com/forms/d/e/<ID>/formResponse
+#   JUDGMENT_FORM_FIELDS JSON mapping of our keys to form entry ids, e.g.
+#     {"date":"entry.111","moisture_pct":"entry.222","model_minutes":"entry.333",
+#      "farmer_minutes":"entry.444","farmer_reason":"entry.555"}
+# Unset -> relay skips silently (local jsonl + audit still written).
+# Relay runs on a daemon thread and never blocks or fails the request.
+# --------------------------------------------------------------------------
+def _relay_judgment_async(rec: dict) -> None:
+    import os
+    import threading
+    import urllib.parse
+    import urllib.request
+
+    url = os.environ.get("JUDGMENT_FORM_URL", "").strip()
+    fields_json = os.environ.get("JUDGMENT_FORM_FIELDS", "").strip()
+    if not url or not fields_json:
+        return
+    try:
+        mapping = json.loads(fields_json)
+    except Exception:
+        audit("judgment_relay_error", error="JUDGMENT_FORM_FIELDS is not valid JSON")
+        return
+    if urllib.parse.urlparse(url).hostname != "docs.google.com":
+        audit("judgment_relay_error", error="JUDGMENT_FORM_URL must be a docs.google.com link")
+        return
+
+    def _send():
+        try:
+            data = {entry_id: str(rec.get(key, ""))
+                    for key, entry_id in mapping.items()}
+            body = urllib.parse.urlencode(data).encode()
+            req = urllib.request.Request(url, data=body, method="POST")
+            with urllib.request.urlopen(req, timeout=10) as resp:
+                audit("judgment_relay_ok", http_status=resp.status)
+        except Exception as e:                       # never break the request path
+            audit("judgment_relay_error", error=str(e)[:200])
+
+    threading.Thread(target=_send, daemon=True).start()
+
+
 def read_status() -> Dict:
     if STATUS_FILE.exists():
         return json.loads(STATUS_FILE.read_text())
@@ -217,6 +265,7 @@ class ModelService:
         audit("farmer_judgment", date=date_str,
               model_minutes=model_minutes, farmer_minutes=farmer_minutes,
               reason=reason or "")
+        _relay_judgment_async(rec)      # durable copy; see comment at the def
 
     # ---- helper: moisture at a given date's morning window, from sensor CSV ----
     def _moisture_on_date(self, sensor_df, date_s, plot_id,

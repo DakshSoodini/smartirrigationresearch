@@ -33,8 +33,11 @@ crop:
   root_depth_m_max: 0.40
   # Sensitive stages where water stress is most costly
   sensitive_stages: ["flowering", "fruiting"]
-  # Optimal volumetric water content band per stage (% of saturation,
-  # which is what the Fyllo "moisture %" sensor returns — see notes)
+  # Optimal moisture band per stage, in SENSOR UNITS - not volumetric
+  # water content. The field probes' absolute scale is unverified (the
+  # vendor calibration is inter-sensor, not gravimetric), so these must
+  # not be restated as VWC or compared to lab FC/WP brackets.
+  # See irrigation_iql_v3/METHODOLOGY.md (compiled 2026-08-06).
   optimal_moisture_band:
     initial:     [65, 90]
     development: [70, 90]
