@@ -40,6 +40,9 @@
   .pill{display:inline-block;background:#0e1b14;border:1px solid var(--line);
     border-radius:999px;padding:5px 13px;font-size:.8rem;color:var(--muted);margin-top:14px}
   .readout{font-size:.86rem;color:var(--muted);margin-top:10px}
+  button.ghost{width:100%;padding:11px;border-radius:10px;border:1px solid var(--line);
+    background:#0e1b14;color:var(--muted);font-size:.9rem;cursor:pointer;margin-top:12px}
+  button.ghost:active{border-color:var(--accent);color:var(--accent)}
   .farmerbox{display:none;margin-top:18px;padding-top:16px;border-top:1px solid var(--line);text-align:left}
   .status{font-size:.82rem;color:var(--muted);text-align:center;margin-top:8px}
   .err{color:var(--warn)}
@@ -55,7 +58,8 @@
 <body>
 <div class="wrap">
   <h1>🌱 Irrigation Advisor</h1>
-  <div class="sub">Plot T2 — upload the node file and get watering advice.</div>
+  <div class="sub">Plot T2 — upload the node file and get watering advice.
+    The irrigation schedule loads itself from the shared sheet.</div>
 
   <div class="card">
     <div class="step">Step 1 · Sensor file</div>
@@ -65,13 +69,10 @@
   </div>
 
   <div class="card">
-    <div class="step">Step 2 · Irrigation history file <span class="opt">(optional)</span></div>
-    <label>Upload the events table (past rain &amp; irrigation records)</label>
-    <input id="eventsFile" type="file" accept=".csv">
-    <div class="readout" id="eventsNote"></div>
-    <pre>date,type,amount,unit,farmer_would_water,farmer_reason
-2026-06-10,irrigation,30,minutes,20,soil looked dry
-2026-06-15,rain,1.0,hours,0,rain expected</pre>
+    <div class="step">Step 2 · Irrigation history <span class="opt">(from the shared sheet)</span></div>
+    <label>Past rain &amp; irrigation records — read automatically, no upload needed</label>
+    <div class="readout" id="sheetNote">Loading the schedule from the sheet…</div>
+    <button class="ghost" id="syncBtn">Refresh from sheet</button>
   </div>
 
   <div class="card">
@@ -125,8 +126,37 @@ function setRain(v){rained=v;
 
 document.getElementById('file').onchange=(e)=>{const f=e.target.files[0];
   document.getElementById('fileNote').textContent=f?`Selected: ${f.name}`:'';};
-document.getElementById('eventsFile').onchange=(e)=>{const f=e.target.files[0];
-  document.getElementById('eventsNote').textContent=f?`Selected: ${f.name}`:'';};
+
+// Irrigation history comes from the shared Google Sheet, not an upload.
+// Runs once on load so the worker never has to think about it; the button
+// is only for picking up edits made to the sheet while the page is open.
+async function syncSheet(){
+  const el=document.getElementById('sheetNote');
+  const btn=document.getElementById('syncBtn');
+  el.className='readout';
+  el.innerHTML='<span class="spin"></span> Reading the schedule from the sheet…';
+  btn.disabled=true;
+  try{
+    const fd=new FormData(); fd.append('planting_date',PLANTING);
+    const r=await fetch('/api/sync_sheet',{method:'POST',body:fd});
+    const d=await r.json();
+    if(!r.ok || d.ok===false){
+      el.className='readout err';
+      el.textContent=d.detail||d.error||'Could not read the sheet.';
+      return;
+    }
+    const rows=d.rows||[];
+    const compared=rows.filter(x=>x.model_minutes!=null).length;
+    let t=d.summary||'Schedule loaded.';
+    if(rows.length) t+=` ${compared} of ${rows.length} have a model comparison.`;
+    el.className='readout';
+    el.textContent=t;
+  }catch(e){
+    el.className='readout err';
+    el.textContent='Could not reach the sheet. Check it is still link-shared.';
+  }finally{ btn.disabled=false; }
+}
+document.getElementById('syncBtn').onclick=syncSheet;
 
 async function refreshStatus(){try{
   const s=await (await fetch('/api/status')).json();
@@ -141,8 +171,6 @@ document.getElementById('go').onclick=async ()=>{
   fd.append('file',f); fd.append('planting_date',PLANTING);
   fd.append('rained',rained?'yes':'no');
   fd.append('rain_hours',rained?(document.getElementById('rainHours').value||0):0);
-  const ef=document.getElementById('eventsFile').files[0];
-  if(ef){ fd.append('events_file', ef); }
 
   const res=document.getElementById('result'); res.style.display='block';
   document.getElementById('bigNum').innerHTML='<span class="spin"></span>';
@@ -200,6 +228,7 @@ document.getElementById('saveFarmer').onclick=async ()=>{
 };
 
 refreshStatus(); setInterval(refreshStatus,8000);
+syncSheet();
 </script>
 </body>
 </html>
