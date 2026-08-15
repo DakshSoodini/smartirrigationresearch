@@ -199,13 +199,28 @@ class ModelService:
     def _load_live_or_bootstrap(self):
         self.sim_cfg = self._build_sim_cfg()
         self.env_cfg = self._build_env_cfg()
-        if LIVE_SIMCFG.exists():
+        # The live checkpoint and its sim config are a PAIR — a policy is only
+        # valid under the physics it was trained on. Applying a stale
+        # live_simcfg.json on top of a freshly packaged checkpoint silently
+        # mixes the two: in Aug 2026 a leftover file (FC 95 / WP 25) shadowed
+        # the redeployed FC 62.8 / WP 47.8 model, which pushed the FAO-56
+        # depletion trigger from 57.6% up to 70.5% and made the guardrail fire
+        # at every reading the field produces.
+        pkg_ckpt = ROOT / "artifacts" / "ckpts" / "iql_final.pt"
+        # A newly shipped checkpoint supersedes a locally-refined one. Without
+        # this, a live.pt left on disk from an earlier refine keeps serving
+        # after a redeploy and the new model never takes effect.
+        use_live = LIVE_CKPT.exists()
+        if use_live and pkg_ckpt.exists():
+            if pkg_ckpt.stat().st_mtime > LIVE_CKPT.stat().st_mtime:
+                use_live = False
+        if LIVE_SIMCFG.exists() and use_live:
             saved = json.loads(LIVE_SIMCFG.read_text())
             for k, v in saved.items():
                 if hasattr(self.sim_cfg, k):
                     setattr(self.sim_cfg, k, v)
         self.agent = self._new_agent()
-        if LIVE_CKPT.exists():
+        if use_live:
             self.agent.load_state_dict(torch.load(LIVE_CKPT, map_location="cpu",
                                                   weights_only=False))
             write_status(state="ready",
@@ -213,7 +228,6 @@ class ModelService:
                          message="Live model loaded.")
         else:
             # bootstrap: copy the packaged checkpoint if present
-            pkg_ckpt = ROOT / "artifacts" / "ckpts" / "iql_final.pt"
             if pkg_ckpt.exists():
                 self.agent.load_state_dict(torch.load(pkg_ckpt, map_location="cpu",
                                                       weights_only=False))
@@ -516,11 +530,40 @@ class ModelService:
         a_idx = self.agent.act(obs, deterministic=True)
         litres = self.env_cfg.action_litres_per_plant[a_idx]
 
+        # ---- FAO-56 agronomic floor --------------------------------------
+        # The IQL policy is an extrapolation below the stress threshold: the
+        # simulator rests near field capacity, so only ~2% of the offline
+        # buffer sits in the dry band the field actually occupies. In August
+        # 2026 that produced 0 minutes at every moisture level plot P3
+        # experienced, while P3 went 11 days without irrigation and became
+        # the driest of the three plots. This guardrail guarantees a plot
+        # past the FAO-56 depletion limit is never told to do nothing.
+        floor_applied = False
+        if (self.cfg.get("serving", {}) or {}).get("fao56_floor", True):
+            mad = float(self.cfg["crop"].get("MAD", 0.35))
+            trigger = self.sim_cfg.FC - mad * (self.sim_cfg.FC - self.sim_cfg.WP)
+            if litres <= 0.0 and moisture_pct < trigger:
+                fao_litres = self._fao56_floor_litres(
+                    moisture_pct=moisture_pct, moisture_deep_pct=s_deep,
+                    days_after_transplant=days_after_transplant, hour=hour)
+                if fao_litres > 0.0:
+                    litres = fao_litres
+                    floor_applied = True
+
         # Convert litres -> drip minutes using the emitter rate (1 L/h confirmed)
         emitter_L_per_h = self.cfg["actuator"].get("emitter_rate_L_per_h", 1.0)
         minutes = round(litres / max(emitter_L_per_h, 1e-6) * 60.0)
 
         stage_name = ["initial", "development", "mid (flowering)", "late"][stage]
+        if floor_applied:
+            note = (f"Run drip ~{int(minutes)} min ({litres:.2f} L/plant). "
+                    f"Soil is past the FAO-56 depletion limit, so this is the "
+                    f"agronomic minimum rather than the model's own figure.")
+        elif litres == 0:
+            note = "No water needed now."
+        else:
+            note = f"Run drip ~{int(minutes)} min ({litres:.2f} L/plant)."
+
         return {
             "ok": True,
             "plot": "T2",
@@ -531,9 +574,40 @@ class ModelService:
             "litres_per_plant": round(litres, 2),
             "drip_minutes": int(minutes),
             "model_version": read_status().get("model_version", 0),
-            "note": ("No water needed now." if litres == 0
-                     else f"Run drip ~{int(minutes)} min ({litres:.2f} L/plant)."),
+            # Recorded so the trial can report how often the guardrail fired.
+            "source": "fao56_floor" if floor_applied else "iql",
+            "floor_applied": floor_applied,
+            "note": note,
         }
+
+    def _fao56_floor_litres(self, *, moisture_pct: float,
+                            moisture_deep_pct: float,
+                            days_after_transplant: int, hour: int) -> float:
+        """FAO-56 MAD dose for the current state, in litres per plant.
+
+        DeployPolicyConfig's own defaults are the pre-2026-08 moisture scale
+        (FC 95 / WP 25, bands 75-95) and would never fire on this sensor's
+        range, so every field-dependent value is taken from config.yaml and
+        the calibrated sim config instead.
+        """
+        from src.initial_policy_deploy import (DeployInitialPolicy,
+                                               DeployPolicyConfig)
+        crop = self.cfg["crop"]
+        band = {k: tuple(v) for k, v in crop["optimal_moisture_band"].items()}
+        pcfg = DeployPolicyConfig(
+            decision_hours=tuple(self.cfg["actuator"]["decision_hours"]),
+            FC=float(self.sim_cfg.FC),
+            WP=float(self.sim_cfg.WP),
+            MAD=float(crop.get("MAD", 0.35)),
+            stage_days=dict(crop["stage_days"]),
+            optimal_band=band,
+        )
+        rec = DeployInitialPolicy(pcfg).recommend(
+            soil_moisture_pct=moisture_pct,
+            soil_moisture_deep_pct=moisture_deep_pct,
+            days_after_transplant=days_after_transplant,
+            hour=hour)
+        return float(rec.get("litres_per_plant", 0.0) or 0.0)
 
     # ---- background refine cycle ---------------------------------------
     def refine_async(self, upload_path: str, planting_date: str,
