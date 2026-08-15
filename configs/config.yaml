@@ -38,11 +38,17 @@ crop:
   # vendor calibration is inter-sensor, not gravimetric), so these must
   # not be restated as VWC or compared to lab FC/WP brackets.
   # See irrigation_iql_v3/METHODOLOGY.md (compiled 2026-08-06).
+  # RE-DERIVED 2026-08 from the field probes' own range. The previous bands
+  # (initial 65-90, development 70-90, mid 75-95, late 60-85) sat ~15 points
+  # above anything the sensors report: measured against the corrected July
+  # data (n=4,753, median 62.3%, never below 56.0) they scored 87-98% of a
+  # healthy crop's readings as STRESS, so the stress penalty was a constant
+  # the agent could not lower by watering and it learned to water minimally.
   optimal_moisture_band:
-    initial:     [65, 90]
-    development: [70, 90]
-    mid:         [75, 95]    # tightest band, most sensitive
-    late:        [60, 85]
+    initial:     [55, 65]
+    development: [56, 65]
+    mid:         [58, 65]    # tightest band, most sensitive
+    late:        [54, 65]
   # Management allowed depletion (fraction of TAW)
   MAD: 0.35
 
@@ -63,14 +69,22 @@ crop:
 # FC = 95 % (sensor saturation; net house soil retains water strongly)
 # WP = 25 %  (conservative; sensor unreliable below ~15%, using 25% as safe bound)
 soil:
-  field_capacity_pct: 95.0        # updated from 80 → 95 (sensor FC, net house soil)
-  wilting_point_pct: 25.0
+  field_capacity_pct: 62.8        # MEASURED 2026-08 (was 95.0, unreachable —
+                                  # real post-irrigation peaks are 77-92.6%
+                                  # and the soil rests near 62%)
+  wilting_point_pct: 47.8         # inferred (was 25.0); the crop has never
+                                  # wilted, so this is not directly observable
+                                  # — needs soil texture or the pot experiment
   saturation_pct: 100.0
   surface_layer_depth_m: 0.10
   deep_layer_depth_m: 0.30
   # Drainage time constant (h) — re-calibrated from net house soil drying curves
   # (22-26 May 2026 pot experiment, no-irrigation rows, pots 2-5)
-  tau_drain_h: 23.8               # log-calibrated (10 days, 289 transitions, 22-31 May 2026)
+  tau_drain_h: 2.1                # re-fitted 2026-08 against FC=62.8 on the
+                                  # corrected July-August field series (was
+                                  # 23.8 from the May pot log, which assumed
+                                  # the old FC). Must match the deployed
+                                  # artifacts/ckpts/sim_cfg.yaml.
   # Bare-soil evaporation (greenhouse, covered surface)
   Ke_max: 0.20
 
@@ -98,6 +112,22 @@ actuator:
   # NOTE: the node firmware's `treatment` CSV column does NOT reflect this
   # (it tags P1=0, P2=1, P3=1) — software maps plot_id -> treatment instead.
   t2_plot_id: "P3"
+
+# ---------- Serving-time behaviour ----------
+serving:
+  # Agronomic guardrail. When the IQL policy returns 0 litres AND measured
+  # moisture is below the FAO-56 depletion trigger, FC - MAD*(FC-WP) = 57.6%,
+  # serve the FAO-56 dose instead of the model's zero.
+  #
+  # Why: the policy is an extrapolation below the stress threshold. The
+  # simulator rests near field capacity, so only ~2% of the offline buffer
+  # lies in the dry band the field actually occupies. In August 2026 the
+  # deployed model returned 0 minutes at every level plot P3 experienced,
+  # and P3 went 11 days unirrigated and became the driest of the three plots.
+  #
+  # Responses carry source: "iql" | "fao56_floor" so the trial can report how
+  # often the guardrail fired rather than presenting it as pure RL.
+  fao56_floor: true
 
 # ---------- State / observation ----------
 # Canonical 14-D vector — built ONLY by src/obs.build_obs (that file is the
