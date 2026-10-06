@@ -16,7 +16,6 @@ End-to-end offline-RL training pipeline:
      the non-irrigation rows only; these are state-prior contributions).
   5. Train IQL on the combined offline buffer.
   6. Periodically evaluate on held-out simulator rollouts.
-  5. Periodically evaluate on held-out simulator rollouts.
 """
 
 from __future__ import annotations

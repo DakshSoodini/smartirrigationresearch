@@ -1,189 +1,168 @@
-# Cucumber IQL — Offline Reinforcement Learning for Greenhouse Drip Irrigation
+# PANI: Offline Reinforcement Learning for Irrigation Scheduling
 
-A research-grade implementation of **Implicit Q-Learning (IQL)** for autonomous drip-irrigation control of greenhouse English cucumber under Telangana conditions. Trained against a FAO‑56–calibrated soil–water simulator whose drying dynamics were fit to Fyllo sensor data collected across four plots, 28 Feb – 27 Apr 2026.
+**PANI** uses **Implicit Q-Learning (IQL)**, an offline reinforcement-learning method, to decide how much to water greenhouse English cucumber in Telangana, India. It never experiments on the live crop. The agent learns inside a FAO‑56 soil–water simulator calibrated to real sensor data. It is served to the farm through a phone-friendly web app. A safety layer of agronomic rules always sits between the model and the plants.
 
-The system ships with:
+It was deployed in a three-plot field trial starting in June 2026.
 
-1. A **safe day-one initial policy** (FAO‑56 management-allowed-depletion heuristic) you can deploy immediately, before any RL training has converged.
-2. An **offline-trained IQL agent** that learns a balanced water-vs-yield policy in simulation, with a built-in safety wrapper that enforces hard agronomic guards regardless of what the network proposes.
-3. An **online learning loop** that ingests new sensor data from plots T0/T1/T2/T3, refits the simulator's dynamics if the residuals drift, fine-tunes the IQL agent on the new offline buffer, and **shadow-tests the candidate against the live agent for several days before promoting it**.
+**Author:** Daksh Soodini · [dakshsoodini.github.io](https://dakshsoodini.github.io)
 
 ---
 
-## Why IQL?
+## At a glance
 
-The Fyllo dataset records soil-moisture and soil-temperature transitions but **does not log irrigation actions**, so direct offline RL on the raw transitions is not possible. The chosen architecture instead:
+| | |
+|---|---|
+| **Problem** | Small farms irrigate on fixed schedules or by feel. This wastes water when the soil is wet and stresses the crop when it is dry. |
+| **Approach** | Calibrate a soil–water simulator to real sensor data, then train an IQL agent offline on simulated plus real transitions. Serve it with FAO‑56 guardrails. |
+| **Crop / site** | English cucumber, shade house (25 % shade net), Telangana, transplanted 8 June 2026 |
+| **Decisions** | Twice a day (09:00 and 14:00 IST). Output is litres per plant, shown as drip minutes. |
+| **Data** | 4-plot Fyllo sensor export (Feb–Apr 2026), 5-pot hand-logged experiment (May 2026), 5-minute field logs (Jun 2026 onward) |
+| **Stack** | Python, PyTorch, NumPy/SciPy, pandas, FastAPI |
 
-- Calibrates a FAO‑56 single‑Kc soil‑water-balance simulator against the real drying curves (no-irrigation rows only, identified by `dM_surface < 4 %/h`).
-- Generates offline (s, a, r, s′) tuples inside that simulator using a **mixture behavior policy** (FAO‑56 threshold + random + over-watering + deficit), so IQL sees coverage across stress, anoxia and waste regions.
-- Trains IQL — which never queries `max_a Q(s', a)` and so never extrapolates onto out-of-distribution actions — on that buffer, with an expectile (τ = 0.80) value function and advantage-weighted regression policy update (β = 3.0), per Kostrikov et al., *ICLR 2022*.
-- Augments the buffer with the **real observed plot transitions** under a `null_action = 0` (no pulse delivered in that 30‑min window), so the agent sees real-world drying behavior even though the action labels are imputed.
+---
 
-This is more conservative than training IQL directly on simulator data because the policy must explain real observations under reasonable action attribution; it is more robust than pure model-free offline RL because we never need true actions to have been logged.
+## How it works
+
+```mermaid
+flowchart LR
+    A[Sensor data<br/>Fyllo, pot log, field nodes] --> B[Calibrate FAO-56<br/>soil-water simulator]
+    B --> C[Offline buffer<br/>mixed behaviour policies<br/>+ real labelled transitions]
+    C --> D[Train IQL agent]
+    D --> E[Web app<br/>recommendation + FAO-56 floor]
+    E --> F[Field worker<br/>waters plot P3]
+    F --> G[New sensor CSV<br/>+ decision log]
+    G --> H[Refine candidate<br/>shadow-test vs live model]
+    H -- promoted only if better --> E
+```
+
+1. **Calibrate.** A two-layer FAO‑56 soil–water balance (`src/simulator.py`) is fitted to observed drying curves (`src/calibrate.py`). The fit uses the Fyllo export, the pot experiment and the field logs.
+2. **Generate offline data.** Rollouts in the calibrated simulator use a *mixture* of behaviour policies: the FAO‑56 heuristic, random, over-watering and deficit. This gives the dataset coverage of stress, waterlogging and waste. Real transitions with known irrigation amounts are added on top.
+3. **Train IQL** (`src/iql.py`, `src/train.py`). Expectile value function (τ = 0.80) and advantage-weighted policy extraction (β = 3.0), following Kostrikov et al., *ICLR 2022*.
+4. **Serve** (`webapp/`). The worker uploads the sensor node's SD-card CSV. The app reads plot P3's latest moisture and returns a dose for the next decision window.
+5. **Refine safely.** Each upload recalibrates the simulator and fine-tunes a *candidate* model. The candidate replaces the live model only if it beats it on simulated seasons. Bad data is quarantined, and every step is written to an audit log.
+
+### Why IQL?
+
+The historical sensor data records soil moisture and temperature but **not the irrigation actions**, and trial-and-error learning on a live crop is not acceptable. IQL learns entirely from a fixed dataset. It never evaluates `max_a Q(s′, a)`, so it never bootstraps from actions the data does not support. That makes it a conservative choice when the data is small and the cost of a bad action is a damaged crop.
+
+---
+
+## The field trial
+
+| Plot | Treatment | Irrigation |
+|---|---|---|
+| P1 | **T0** | Farmer's traditional schedule |
+| P2 | **T1** | Fixed 12-minute, alternate-day control |
+| P3 | **T2** | PANI recommendations (IQL + FAO‑56 floor) |
+
+- **Sensing:** ESP32-based nodes logging soil moisture and temperature at 20 cm, every 5 minutes.
+- **Actuation:** no solenoid valve. A worker reads the recommendation at each window and runs the drip line (1 L/h emitters, about one per plant).
+- **Measurement:** at each window the worker logs whether the recommendation was followed, and what was done instead if not (`/decide`). They also record their own judgment of how much to water. Together these give a model-vs-farmer comparison.
+
+### What the field taught us
+
+The first deployment surfaced problems that simulation alone did not:
+
+- **The moisture targets were wrong for the real sensors.** The original optimal bands sat about 15 points above anything the probes report. Against 4,753 July readings (median 62.3 %), 87–98 % of a healthy crop's readings scored as "stress". The penalty became a constant the agent could not reduce by watering. The bands, field capacity and wilting point were re-derived from the sensors' observed range.
+- **The model never learned to water a dry plot.** The training buffer had 0 of 9,493 rows below 56 % moisture with any water applied. The July model therefore recommended 0 minutes at every moisture level P3 experienced, and P3 went 11 days without irrigation. The fix had two parts:
+  - The model was retrained on buffers that contain dry-and-watered examples.
+  - An **FAO‑56 agronomic floor** was added: if the model says 0 but moisture is below the depletion trigger (57.6 %), the app serves the FAO‑56 dose instead.
+
+  Every response is tagged `source: "iql"` or `"fao56_floor"`, so the trial can report how often the guardrail fired rather than presenting the result as pure RL.
+- **Free hosting loses data.** The host's disk is wiped on every restart, and one farmer judgment was lost this way. The app can now relay judgments to a Google Form as they arrive.
 
 ---
 
 ## Repository layout
 
 ```
-irrigation_iql/
-├── README.md                          ← this file
+smartirrigationresearch/
+├── README.md
 ├── requirements.txt
-├── fyllo.xlsx                         ← raw sensor data (Fyllo, 4 plots, hourly)
+├── run_training.sh              ← full 200k-step training in resumable chunks
+├── benchmark.py                 ← T0 / T1 / T2 comparison in the simulator
+├── fyllo.xlsx                   ← Fyllo sensor export, 4 shade plots, hourly (Feb–Apr 2026)
 ├── configs/
-│   └── config.yaml                    ← all hyperparameters (crop, soil, IQL, env)
+│   └── config.yaml              ← crop, soil, actuator, reward and IQL settings
+├── data/
+│   ├── soil_log.csv             ← hand-recorded pot experiment (22–26 May 2026)
+│   └── TST1234_00{1,2}.csv      ← field sensor logs (5-minute cadence)
 ├── docs/
-│   └── METHODOLOGY.md                 ← research methodology, data findings, citations
+│   ├── METHODOLOGY.md           ← derivations, calibration, references
+│   └── HARDWARE_GAP.md          ← actuation hardware needed for closed-loop control
 ├── src/
-│   ├── data_loader.py                 ← parses Fyllo Excel → PlotTimeseries
-│   ├── simulator.py                   ← FAO-56 two-layer soil-water balance
-│   ├── calibrate.py                   ← fits sim params to real drying curves
-│   ├── env.py                         ← Gym-style IrrigationEnv (14-d obs, 6 actions)
-│   ├── initial_policy.py              ← FAO-56 MAD-threshold initial policy
-│   ├── iql.py                         ← IQL agent (Q, V, π networks + ReplayBuffer)
-│   ├── train.py                       ← end-to-end training pipeline
-│   ├── deploy.py                      ← SafeController + 3-policy comparison harness
-│   └── online_update.py               ← sensor ingestion + shadow-test + promote
-└── artifacts/
-    └── ckpts/
-        ├── iql_final.pt               ← trained agent
-        └── sim_cfg.yaml               ← calibrated simulator parameters
+│   ├── simulator.py             ← two-layer FAO-56 soil-water balance + crop model
+│   ├── calibrate.py             ← fit simulator parameters to observed drying curves
+│   ├── data_loader.py           ← Fyllo Excel → per-plot timeseries
+│   ├── log_loader.py            ← pot-experiment log → labelled transitions
+│   ├── field_loader.py          ← field sensor CSVs + event log → transitions
+│   ├── obs.py                   ← single source of truth for the 14-D observation
+│   ├── env.py                   ← decision-window environment (9 AM / 2 PM, litres)
+│   ├── initial_policy.py        ← FAO-56 MAD heuristic (simulator side)
+│   ├── initial_policy_deploy.py ← FAO-56 heuristic (field side)
+│   ├── iql.py                   ← IQL agent: twin Q, V, policy networks
+│   ├── train.py                 ← end-to-end training pipeline
+│   ├── online_update.py         ← ingestion, dynamics refit, shadow-test, promote
+│   └── deploy.py                ← legacy v1 safety wrapper (pulse-minute actuator; kept for reference)
+├── artifacts/ckpts/
+│   ├── iql_final.pt             ← deployed IQL checkpoint
+│   └── sim_cfg.yaml             ← simulator parameters paired with it
+└── webapp/                      ← FastAPI advisory app (see webapp/README.md)
 ```
 
 ---
 
 ## Quickstart
 
-### 1. Install
+Tested with Python 3.13.
 
 ```bash
 pip install -r requirements.txt
 ```
 
-If torch installs slowly or fails, install it first:
+**Benchmark the shipped model** in the simulator (under a minute on a laptop CPU):
+
 ```bash
-pip install torch --index-url https://download.pytorch.org/whl/cpu
-pip install -r requirements.txt
+python benchmark.py --episodes 30
 ```
 
-### 2. Run full training (recommended — uses resume script)
+This prints water use, a yield proxy, stress hours and oversaturation hours for three simulated policies:
+- **T0:** a fixed 0.5 L/plant every session.
+- **T1:** the FAO‑56 heuristic.
+- **T2:** the IQL agent.
+
+These are simulator results, not field yields.
+
+**Train from scratch** (200,000 gradient steps, in 25k-step chunks that resume automatically):
 
 ```bash
-chmod +x run_training.sh
 ./run_training.sh
 ```
 
-This handles the full 200,000-step training in 25,000-step chunks that save
-progress and resume automatically. Each chunk takes ~12–15 min on a laptop CPU.
-Total ~90 min. Output goes to `artifacts/ckpts/iql_final.pt`.
-
-If you stop and restart, it picks up from where it left off.
-
-### 3. Benchmark the trained model
-
-```bash
-python benchmark.py --config configs/config.yaml \
-  --ckpt artifacts/ckpts/iql_final.pt --episodes 30
-```
-
-### 4. Run the web app (farm interface)
+**Run the web app locally:**
 
 ```bash
 cd webapp
 uvicorn app:app --reload --port 8000
 ```
 
-Open `http://localhost:8000` in your browser.
-
-This runs three controllers in the same calibrated simulator, each wrapped in `SafeController`:
-
-- **T0 — Fixed schedule.** 10 minutes at 06:00 every day (the naive baseline).
-- **T1 — Initial policy.** FAO‑56 MAD threshold; safe enough to deploy day one.
-- **T2 — IQL.** The trained agent, advantage-weighted.
-
-You get a per-policy table of total water (mm), stress hours, oversaturation hours, yield proxy and net return.
-
-### 4. Live deployment
-
-```python
-from src.deploy import SafeController
-from src.iql import IQLAgent
-from src.initial_policy import InitialPolicy
-
-# Day 1: use the heuristic
-controller = SafeController(policy=InitialPolicy(cfg), cfg=cfg)
-
-# After IQL has trained and the agronomist has approved the rollout:
-agent = IQLAgent.load("artifacts/ckpts/iql_final.pt")
-controller = SafeController(policy=agent, cfg=cfg)
-
-# Every 30 minutes:
-action_idx = controller.act(observation)        # 0..5  → pulse minutes [0,1,2,5,10,20]
-pulse_minutes = cfg["env"]["action_pulse_minutes"][action_idx]
-# → send pulse_minutes to the solenoid driver
-```
-
-`SafeController` enforces, in order: emergency-dry override (forces a pulse if both layers < 28 %), out-of-window block (only 05–08 h and 15–18 h), min-interval block, daily cap, and oversaturation block (> 95 %).
-
-### 5. The online learning loop (T0/T1/T2/T3 → improve)
-
-This is the mechanism described in the research proposal — the model improves over time as more plots stream in.
-
-```python
-from src.online_update import OnlineUpdater, SensorEvent
-
-updater = OnlineUpdater(
-    live_agent_path="artifacts/ckpts/iql_final.pt",
-    sim_cfg_path="artifacts/ckpts/sim_cfg.yaml",
-    cfg=cfg,
-)
-
-# As each new Fyllo reading arrives (every ~30 min, all plots):
-updater.ingest(SensorEvent(plot_id="T1_plot2", ts=ts,
-                           M_surface=ms, M_deep=md, T_soil=ts_c,
-                           action_minutes=last_pulse))
-
-# Once a day, or on demand:
-updater.maybe_update_dynamics()   # refit sim params if residuals biased > 5 %
-updater.maybe_finetune()          # warm-start candidate IQL from live agent, train 2000 steps
-updater.shadow_test_and_promote() # candidate must beat live agent for shadow_test_days
-                                  # in sim before it touches the valve
-```
-
-The **live actuator only ever runs a policy that has cleared shadow testing**; the candidate is evaluated alongside the live agent on the same observation stream, and is promoted only if its expected return on the post-update simulator exceeds the live agent's by more than the noise floor.
+Then open <http://localhost:8000>. The researcher view is at `/research`.
 
 ---
 
-## Recommended deployment protocol
+## Limitations
 
-| Phase | Duration | Controller | Why |
-|---|---|---|---|
-| 0 — Bench | 1 day | None | Verify Fyllo polling, valve actuation, flow meter, logs |
-| 1 — Heuristic | 7–14 days | `InitialPolicy` (FAO-56 MAD) | Build a real action-labelled dataset under a known-safe rule |
-| 2 — IQL-shadow | 7 days | `InitialPolicy` actuating, IQL logging proposals only | Compare IQL recommendations vs heuristic on live observations |
-| 3 — IQL-active | ongoing | `IQLAgent` via `SafeController` | RL takes over; safety wrapper still active |
-| 4 — Continuous | ongoing | as Phase 3 + `OnlineUpdater` daily | Refit dynamics + fine-tune + shadow-test + promote |
+- **Simulated evaluation.** The benchmark compares policies inside the calibrated simulator. Real-world outcomes come from the field trial, not from these numbers.
+- **No yield labels yet.** The reward uses a yield proxy built from root-zone water and stress hours. Once harvest data exists, the reward weights should be re-fitted.
+- **Sensor units, not volumetric water content.** The probes' absolute scale is uncalibrated against gravimetric measurements, so moisture targets are expressed in sensor units.
+- **Missing weather inputs.** Air temperature, humidity and radiation were not logged. ET₀ therefore uses a temperature-based (Hargreaves-style) surrogate whose radiation term is absorbed by calibration.
+- **Small, dry-band-sparse data.** IQL extrapolates where the data is thin. The FAO‑56 floor exists because of this, and how often it fires is a direct measure of the problem.
+- **Human-executed actions.** Without a solenoid valve, the dose applied can differ from the dose recommended. The decision log records both.
 
-Phases 1 and 2 give you ground-truth action labels, which makes the second IQL re-training cycle dramatically stronger than the first one (no longer reliant on imputed `null_action = 0` for real transitions).
-
----
-
-## Honest limitations
-
-This system was built against a real dataset with real gaps. They matter for interpretation:
-
-1. **No logged irrigation actions in the source data.** The first round of IQL therefore trains predominantly on simulator transitions; the real-data augmentation uses `action = 0`. After Phase 1 above, this constraint is removed.
-2. **No air temperature, humidity, VPD, or light data** in the Fyllo file despite header rows present — every value was NaN. ET₀ in the simulator therefore uses a Hargreaves approximation against soil temperature and a fixed extraterrestrial radiation value for 17° N latitude; calibration captures the rest. Adding an air-temp/RH sensor would meaningfully tighten the simulator.
-3. **No yield labels.** The reward includes a terminal yield proxy derived from cumulative root-zone water and stress hours — a surrogate, not a true yield model. Once one season of yield data is collected, the reward function should be re-fit (treat current weights as a prior).
-4. **Treatments in the Fyllo data are shade-based**, not irrigation-based, so the four plots do not provide a contrast in watering policies — they provide replicates of the same drying physics under different radiation loads. This was useful for calibration but means we cannot read off "which irrigation strategy worked better" from the historical data.
-5. **Hardware gap.** The Rapidcircuitry quote covers sensor nodes only — there is no solenoid valve, no flow meter, and the 4-node count is tight for 3 plots × 2 depths plus a redundant node. Add a 24 V latching solenoid + Hall-effect flow meter per plot before going live.
-
-See `docs/METHODOLOGY.md` for the full treatment.
+`docs/METHODOLOGY.md` records the original v1 design, derivations and references in full.
 
 ---
 
 ## Citation
 
-If you build on this in a publication, the methodology document lists the underlying references (FAO‑56, IQL, etc.). The system itself can be cited as:
-
-> Smart-irrigation IQL controller for greenhouse English cucumber, Telangana. Implementation against Fyllo soil-sensor data, 2026.
+> Soodini, D. (2026). *PANI: Offline reinforcement learning for irrigation scheduling of greenhouse English cucumber in Telangana.* https://github.com/DakshSoodini/smartirrigationresearch

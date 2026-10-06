@@ -1,69 +1,62 @@
-# Smart Irrigation Advisor — Web App
+# PANI Web App: Irrigation Advisor
 
-A local-first web application that serves the IQL irrigation model to a farm
-worker and refines it automatically (and safely) as new sensor data arrives.
+A FastAPI app that serves the IQL irrigation model to the farm and refines it safely as new sensor data arrives. It is built for a field worker on a phone: one screen and large text.
 
-Two views:
-- **`/`** — farm-facing page. Enter the current moisture reading from the node
-  and the time; get back "run the drip for X minutes." Upload the SD-card CSV
-  to let the model learn. Designed for a phone, one screen, large text.
-- **`/research`** — researcher view. Model version, calibration state, and the
-  full audit log of every upload and every promote/reject decision.
+## Pages
 
-## Safety model (important)
+- **`/`**: farm page. The worker uploads the sensor node's SD-card CSV. The app reads plot P3's latest moisture and recommends a dose for the next 09:00 or 14:00 window, in litres per plant and drip minutes. The worker can record what they would have done instead. The irrigation history loads from the farm's field-log Google Sheet.
+- **`/decide`**: decision log. At each window the worker records whether the recommendation was carried out, and if not, what was done and why. It can be exported as CSV from `/api/decision_log.csv`.
+- **`/research`**: researcher view. It shows the model version, calibration state and the full audit log. It also has an admin-key-protected form for uploading a newly trained checkpoint.
 
-Uploading data **cannot** change what the farm sees on its own. Each upload:
-1. is validated (moisture/temp in range, enough rows) — bad data is **quarantined**;
-2. recalibrates the simulator's deep-layer dynamics from the new field data;
-3. fine-tunes a **candidate** model;
-4. **shadow-tests** the candidate against the live model on simulated seasons;
-5. the candidate is **promoted only if it beats the live model**. Otherwise the
-   trusted live model keeps running.
+The full endpoint list is in the docstring at the top of `app.py`.
 
-Every step is written to `webapp/storage/logs/audit.jsonl` for reproducibility.
+## Safety model
+
+Uploading data **cannot**, on its own, change what the farm is told. Each upload goes through five steps:
+
+1. It is validated (moisture and temperature in range, enough rows). Bad data is **quarantined**.
+2. It recalibrates the simulator from the new field data.
+3. A **candidate** model is fine-tuned.
+4. The candidate is **shadow-tested** against the live model on simulated seasons.
+5. The candidate is **promoted only if it beats the live model**. Otherwise the live model keeps serving.
+
+Separately, every recommendation passes through an **FAO‑56 floor**. If the model says "no water" while the soil is past the FAO‑56 depletion limit, the app serves the FAO‑56 dose instead and tags the response `source: "fao56_floor"`.
+
+Every step is written to `webapp/storage/logs/audit.jsonl`.
 
 ## Run locally
 
 ```bash
-# from the repo root
+# from the repository root
 pip install -r requirements.txt
-pip install fastapi "uvicorn[standard]" python-multipart
-
 cd webapp
 uvicorn app:app --reload --port 8000
 ```
 
-Open <http://localhost:8000> for the farm page, <http://localhost:8000/research>
-for the researcher view.
+Open <http://localhost:8000> for the farm page and <http://localhost:8000/research> for the researcher view. The app bootstraps from the packaged checkpoint in `artifacts/ckpts/`.
 
-The app bootstraps from the packaged checkpoint at
-`artifacts/ckpts/iql_final.pt`. To start from a freshly trained model, run the
-training pipeline first (see the main README), then restart the app.
+## Configuration
 
-## Settings to confirm before field use
+Secrets and links to private resources are read from environment variables and never committed:
 
-In `webapp/static/index.html` set `PLANTING` to the actual transplant date.
-In `configs/config.yaml` the emitter rate (`emitter_rate_L_per_h`, currently
-1.0) is used to convert litres → drip-minutes; confirm it matches the field.
+| Variable | Purpose |
+|---|---|
+| `ADMIN_KEY` | Required to upload a new checkpoint from `/research`. Unset means uploads are refused. |
+| `SHEET_CSV_URL` | CSV export link of the farm's field-log Google Sheet, used by "Refresh from sheet". Unset means sheet sync is disabled. |
+| `JUDGMENT_FORM_URL`, `JUDGMENT_FORM_FIELDS` | Optional. Relays each farmer judgment to a Google Form so it survives restarts on hosts with ephemeral disks. |
 
-## Deploying to a public server (later)
+Field settings to confirm before use:
+- `PLANTING` (the transplant date) in `static/index.html` and `static/events.html`.
+- `emitter_rate_L_per_h` and `t2_plot_id` in `configs/config.yaml`.
 
-The app is a standard FastAPI service, so any host that runs Python + PyTorch works:
+## Deploying
 
-1. **Render / Railway / Fly.io** — push this repo, set the start command to
-   `cd webapp && uvicorn app:app --host 0.0.0.0 --port $PORT`. Pick an instance
-   with at least ~1 GB RAM (PyTorch + fine-tuning). Expect ~$5–15/month.
-2. **A small cloud VM** (e.g. a 1–2 GB droplet) — install the requirements,
-   run uvicorn behind nginx, point a domain at it.
+The included `Procfile` works on PaaS hosts such as Render, Railway or Fly.io:
 
-`webapp/storage/` holds the live model, uploads, and audit log. On a cloud host,
-mount it as a persistent volume so retraining survives restarts.
+```
+web: cd webapp && uvicorn app:app --host 0.0.0.0 --port $PORT
+```
 
-A `Procfile` and `runtime` hint are included for one-click PaaS deploys.
+Use an instance with at least about 1 GB of RAM, since PyTorch and fine-tuning run in-process. `webapp/storage/` holds the live model, uploads and logs. On hosts whose disk is wiped on restart, mount it as a persistent volume or configure the Google Form relay above.
 
-## Background refine note
-
-The refine runs in a background thread. For heavier production use, move it to a
-proper task queue (e.g. a separate worker process) so model training never
-competes with request serving. For the current scale (occasional uploads), the
-in-process background thread is sufficient.
+Refinement runs on a background thread. That is enough for occasional uploads. Heavier use would move it to a separate worker process.

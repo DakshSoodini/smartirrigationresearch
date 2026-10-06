@@ -5,12 +5,27 @@ FastAPI backend for the smart-irrigation advisory tool.
 
 Endpoints
 ---------
-GET  /                      -> farm-facing page (static index.html)
-GET  /research              -> research/admin page (status, audit, manual refine)
-POST /api/recommend         -> {moisture_pct, hour, planting_date} -> recommendation
-POST /api/upload            -> multipart CSV from SD card; kicks off background refine
-GET  /api/status            -> current model status (version, state, last refine)
-GET  /api/audit             -> recent audit-log entries (research view)
+GET  /                       -> farm-facing page (static index.html)
+GET  /research               -> research/admin page (status, audit, model upload)
+GET  /decide                 -> decision-log page for the field worker
+POST /api/recommend          -> {moisture_pct, hour, planting_date} -> recommendation
+POST /api/upload             -> SD-card sensor CSV; recommends, then refines in background
+POST /api/upload_events      -> irrigation/rain events CSV, compared against the model
+GET|POST /api/sync_sheet     -> same as upload_events, read from SHEET_CSV_URL
+POST /api/farmer_judgment    -> record the farmer's own call next to the model's
+POST /api/decision           -> log whether a recommendation was executed
+GET  /api/decision_log[.csv] -> decision log (JSON, or CSV export)
+GET  /api/status             -> current model status (version, state, last refine)
+GET  /api/audit              -> recent audit-log entries (research view)
+GET  /api/judgments          -> farmer judgments on this instance's disk
+POST /api/upload_model       -> replace the live checkpoint (requires ADMIN_KEY)
+
+Environment variables
+---------------------
+ADMIN_KEY             secret for /api/upload_model (unset -> uploads refused)
+SHEET_CSV_URL         CSV export link of the farm's field-log Google Sheet
+JUDGMENT_FORM_URL,    optional Google Form relay for farmer judgments
+JUDGMENT_FORM_FIELDS  (see model_service._relay_judgment_async)
 
 Run locally:
     cd webapp
@@ -241,11 +256,10 @@ def api_judgments(limit: int = 500):
 # SHEET_CSV_URL environment variable (File > Share > Publish to web > CSV, or
 # https://docs.google.com/spreadsheets/d/<ID>/export?format=csv&gid=<gid>
 # on a link-shared sheet). No Google API credentials needed.
-
-# The farm's schedule sheet (link-shared). SHEET_CSV_URL env var overrides.
-DEFAULT_SHEET_CSV_URL = ("https://docs.google.com/spreadsheets/d/"
-                         "1wYvuvvKgb9jGr8sF8_5Bk56UDV7Vqgmd4Pt-FmXy4Q0/"
-                         "export?format=csv")
+#
+# The sheet's URL is deliberately NOT hard-coded: the sheet is link-shared,
+# so anyone holding its ID can open the farm's field log. Keep it only in the
+# host's environment variables.
 
 
 def _field_log_to_events_csv(text: str) -> str:
@@ -318,7 +332,10 @@ def _field_log_to_events_csv(text: str) -> str:
 async def api_sync_sheet(planting_date: str = Form("2026-06-08")):
     import urllib.request
     from urllib.parse import urlparse
-    url = os.environ.get("SHEET_CSV_URL", "").strip() or DEFAULT_SHEET_CSV_URL
+    url = os.environ.get("SHEET_CSV_URL", "").strip()
+    if not url:
+        raise HTTPException(503, "Sheet sync is not configured: set the "
+                                 "SHEET_CSV_URL environment variable.")
     if urlparse(url).hostname not in ("docs.google.com",
                                       "docs.googleusercontent.com"):
         raise HTTPException(400, "SHEET_CSV_URL must be a docs.google.com link.")

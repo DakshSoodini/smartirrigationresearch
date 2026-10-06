@@ -2,6 +2,8 @@
 
 This document records the design decisions, calibration outcomes, references, and known limitations of the system. It is intended to accompany a research write-up or thesis chapter on the proposed smart-irrigation deployment.
 
+> **Version note.** This document describes the original (v1) design, which assumed a solenoid valve and short drip pulses. In the field the controller makes two decisions a day (09:00 and 14:00) in litres per plant, carried out by hand, with an FAO‑56 floor at serving time. Sections 6–7 therefore describe the v1 initial policy and safety wrapper. For the deployed design, see the main `README.md`, `src/env.py`, `src/initial_policy_deploy.py` and `webapp/model_service.py`. The simulator, calibration method, IQL formulation and references below still apply.
+
 ---
 
 ## 1. Source data — what the Fyllo file actually contains
