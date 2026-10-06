@@ -37,7 +37,6 @@ crop:
   # water content. The field probes' absolute scale is unverified (the
   # vendor calibration is inter-sensor, not gravimetric), so these must
   # not be restated as VWC or compared to lab FC/WP brackets.
-  # See irrigation_iql_v3/METHODOLOGY.md (compiled 2026-08-06).
   # RE-DERIVED 2026-08 from the field probes' own range. The previous bands
   # (initial 65-90, development 70-90, mid 75-95, late 60-85) sat ~15 points
   # above anything the sensors report: measured against the corrected July

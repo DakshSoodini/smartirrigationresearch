@@ -10,8 +10,8 @@ Nothing imports it. The live inference path is now `webapp/model_service.py`
 (recommendation + shadow-promotion), and the T0/T1/T2 evaluation harness lives in
 `benchmark.py`. If you need a standalone safety wrapper / policy-comparison CLI
 again, port this to the litres action space and the canonical observation builder
-(`src/obs.build_obs`) first — see CODE_REVIEW issue #3. Kept in the tree only for
-reference until that port happens.
+(`src/obs.build_obs`) first. Kept in the tree only for reference until that
+port happens.
 
 Original description
 --------------------

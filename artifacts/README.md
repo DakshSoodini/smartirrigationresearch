@@ -1,25 +1,19 @@
 # Artifacts
 
-This directory contains:
+`ckpts/` holds the model the web app serves:
 
-- **`ckpts/iql_smoketest.pt`** — IQL agent checkpoint from a **3 000-step smoke run** (not a converged model). It verifies the training pipeline works end-to-end. Eval metrics on this checkpoint already show genuine learning (return improved from −4 176 → −2 652, terminal yield proxy 12.7 → 23.1, stress hours 840 → 560), but the policy has not yet balanced the water-vs-yield trade-off.
-- **`ckpts/sim_cfg.yaml`** — Calibrated simulator parameters from L-BFGS-B fit against the no-irrigation rows of the Fyllo data. These are real and should be reused.
+- **`ckpts/iql_final.pt`**: the deployed IQL agent's weights. They are trained for the two-window, litres-per-plant action space described in the main README.
+- **`ckpts/sim_cfg.yaml`**: the calibrated simulator parameters the checkpoint was trained against.
 
-### To produce a deployment-ready agent
+The two files are a pair. The web app loads them together on start-up (`webapp/model_service.py`), and a checkpoint should never be shipped without its matching `sim_cfg.yaml`.
 
-Run the full training loop, which is 200 000 gradient steps (≈ 1 h on CPU, faster on GPU):
+Intermediate checkpoints, cached buffers and training logs are written here too, but are git-ignored.
 
-```bash
-cd ..    # repo root
-python -m src.train --config configs/config.yaml --fyllo ./fyllo.xlsx
-```
+### Reproduce the checkpoint
 
-This will overwrite `iql_smoketest.pt` with `iql_final.pt` and dump per-epoch eval logs to `artifacts/logs/`.
-
-### To compare the three controllers head-to-head
+From the repository root:
 
 ```bash
-python -m src.deploy --ckpt artifacts/ckpts/iql_final.pt
+./run_training.sh                 # 200k steps in resumable 25k-step chunks
+python benchmark.py --episodes 30 # compare T0 / T1 / T2 in the simulator
 ```
-
-(Use `iql_smoketest.pt` to dry-run the comparison harness without training first; the relative ordering of T0-fixed vs T1-heuristic vs T2-IQL will already be informative.)
