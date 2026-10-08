@@ -6,7 +6,7 @@ T0  Fixed schedule  : same volume every session regardless of soil state.
 T1  FAO-56 MAD      : the initial policy (soil-feedback heuristic).
 T2  IQL             : the trained agent.
 """
-import sys, argparse
+import sys, argparse, dataclasses
 sys.path.insert(0, '.')
 import numpy as np, torch, yaml
 from pathlib import Path
@@ -18,22 +18,36 @@ from src.calibrate import calibrate, calibrate_from_log
 from src.data_loader import load_fyllo_excel, build_observed_transitions
 
 
-def build(cfg):
-    sim_cfg = SimConfig(
-        FC=cfg["soil"]["field_capacity_pct"], WP=cfg["soil"]["wilting_point_pct"],
-        SAT=cfg["soil"]["saturation_pct"],
-        surface_depth_m=cfg["soil"]["surface_layer_depth_m"],
-        deep_depth_m=cfg["soil"]["deep_layer_depth_m"],
-        tau_drain_h=cfg["soil"]["tau_drain_h"], Ke_max=cfg["soil"]["Ke_max"],
-        stage_days=cfg["crop"]["stage_days"], Kc=cfg["crop"]["Kc"],
-        plants_per_m2=cfg["crop"]["plants_per_m2"],
-        root_depth_init_m=cfg["crop"]["root_depth_m_initial"],
-        root_depth_max_m=cfg["crop"]["root_depth_m_max"],
-    )
-    plots = load_fyllo_excel("./fyllo.xlsx")
-    sim_cfg = calibrate(build_observed_transitions(plots), sim_cfg,
-                        subsample=200, verbose=False)
-    sim_cfg = calibrate_from_log("./data/soil_log.csv", sim_cfg, verbose=False)
+def build(cfg, sim_cfg_path=None):
+    if sim_cfg_path and Path(sim_cfg_path).exists():
+        # Evaluate in the simulator the checkpoint was trained against. A
+        # policy is only meaningful under its own physics; recalibrating here
+        # from the May pot log gave tau_drain_h=23.8 h against the deployed
+        # model's 2.1 h.
+        raw = yaml.safe_load(open(sim_cfg_path))
+        known = {f.name for f in dataclasses.fields(SimConfig)}
+        skipped = sorted(set(raw) - known)
+        if skipped:
+            # The deployed checkpoint was trained with a rain model that this
+            # simulator doesn't include; run without it rather than fail.
+            print(f"note: {sim_cfg_path} keys not modelled here, ignored: {skipped}")
+        sim_cfg = SimConfig(**{k: v for k, v in raw.items() if k in known})
+    else:
+        sim_cfg = SimConfig(
+            FC=cfg["soil"]["field_capacity_pct"], WP=cfg["soil"]["wilting_point_pct"],
+            SAT=cfg["soil"]["saturation_pct"],
+            surface_depth_m=cfg["soil"]["surface_layer_depth_m"],
+            deep_depth_m=cfg["soil"]["deep_layer_depth_m"],
+            tau_drain_h=cfg["soil"]["tau_drain_h"], Ke_max=cfg["soil"]["Ke_max"],
+            stage_days=cfg["crop"]["stage_days"], Kc=cfg["crop"]["Kc"],
+            plants_per_m2=cfg["crop"]["plants_per_m2"],
+            root_depth_init_m=cfg["crop"]["root_depth_m_initial"],
+            root_depth_max_m=cfg["crop"]["root_depth_m_max"],
+        )
+        plots = load_fyllo_excel("./fyllo.xlsx")
+        sim_cfg = calibrate(build_observed_transitions(plots), sim_cfg,
+                            subsample=200, verbose=False)
+        sim_cfg = calibrate_from_log("./data/soil_log.csv", sim_cfg, verbose=False)
 
     env_cfg = EnvConfig(
         action_litres_per_plant=cfg["actuator"]["action_litres_per_plant"],
@@ -79,10 +93,13 @@ def main():
     ap.add_argument("--config", default="configs/config.yaml")
     ap.add_argument("--ckpt", default="artifacts/ckpts/iql_final.pt")
     ap.add_argument("--episodes", type=int, default=30)
+    ap.add_argument("--sim-cfg", default="artifacts/ckpts/sim_cfg.yaml",
+                    help="simulator parameters paired with --ckpt; if the file "
+                         "is missing, recalibrate from the raw data instead")
     args = ap.parse_args()
 
     cfg = yaml.safe_load(open(args.config))
-    sim_cfg, env_cfg, ip = build(cfg)
+    sim_cfg, env_cfg, ip = build(cfg, args.sim_cfg)
     litres = cfg["actuator"]["action_litres_per_plant"]
     rng = np.random.default_rng(2024)
     env = IrrigationEnv(env_cfg, sim_cfg, rng=rng)
